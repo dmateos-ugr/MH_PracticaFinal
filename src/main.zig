@@ -6,83 +6,154 @@ const c = @cImport({
 const Allocator = std.mem.Allocator;
 const Random = std.rand.Random;
 const assert = std.debug.assert;
+const print = std.debug.print;
 
 const N_POPULATION = 20;
 
+fn surviveValue(solution: []f64) f64 {
+    for (solution) |v| {
+        std.debug.assert(!std.math.isInf(v));
+        std.debug.assert(!std.math.isNan(v));
+    }
+    const fitness = c.cec17_fitness(solution.ptr);
+    // return fitness;
+    return std.math.log10(fitness);
+    // return 1/std.math.log2(fitness);
+}
+
 fn ppa(funcid: usize, n: usize, allocator: Allocator, rnd: Random) ![]f64 {
     c.cec17_init("ppa", @intCast(c_int, funcid), @intCast(c_int, n));
+    // c.cec17_print_output();
 
     const max_evaluations = n * 10000;
-    var population: [N_POPULATION][]f64 = undefined;
-    var fitnesses: [N_POPULATION]f64 = undefined;
+    var population1: [N_POPULATION][]f64 = undefined;
+    var population2: [N_POPULATION][]f64 = undefined;
+    var fitnesses1: [N_POPULATION]f64 = undefined;
+    var fitnesses2: [N_POPULATION]f64 = undefined;
 
     // Allocate memory for the population, initializing it randomly
-    for (&population) |*element| {
-        element.* = try utils.createRandomSolution(n, allocator, rnd);
+    for (&population1, &population2) |*element1, *element2| {
+        element1.* = try utils.createRandomSolution(n, allocator, rnd);
+        element2.* = try allocator.alloc(f64, n);
     }
-    defer for (population) |element| {
-        allocator.free(element);
+    defer for (population1, population2) |element1, element2| {
+        allocator.free(element1);
+        allocator.free(element2);
     };
+
+    var population = &population1;
+    var fitnesses = &fitnesses1;
+    var new_population = &population2;
+    var new_fitnesses = &fitnesses2;
+
+    // Get fitnesses, and sort population according to them
+    for (population, fitnesses) |element, *fitness| {
+        fitness.* = surviveValue(element);
+    }
+    // for (fitnesses) |fitness| {
+    //     std.debug.print("{}\n", .{fitness});
+    // }
 
     var evaluations: usize = 0;
     while (evaluations < max_evaluations) {
-        // Get fitnesses, and sort population according to them
-        for (population, &fitnesses) |element, *fitness| {
-            fitness.* = c.cec17_fitness(element.ptr);
-        }
-        utils.sortPopulationBestFirst(&population, &fitnesses);
+        // std.debug.print("evaluations: {}\n", .{evaluations});
+        utils.sortPopulationBestFirst(population, fitnesses);
 
+        // Move everything, updating new_population
+        for (0..N_POPULATION - 1) |idx| {
+            evaluations += try movePrey(
+                idx,
+                population,
+                fitnesses,
+                new_population[idx],
+                &new_fitnesses[idx],
+                allocator,
+                rnd,
+            );
+        }
+
+        try movePredator(
+            population,
+            new_population[PREDATOR_IDX],
+            &new_fitnesses[PREDATOR_IDX],
+            allocator,
+            rnd,
+        );
+
+        std.mem.swap(*[N_POPULATION][]f64, &population, &new_population);
+        std.mem.swap(*[N_POPULATION]f64, &fitnesses, &new_fitnesses);
     }
 
     return allocator.dupe(f64, population[0]);
 }
 
+const K = 20;
 const PREDATOR_IDX = N_POPULATION - 1;
 const BEST_PREY_IDX = 0;
-const K = 50;
+const WORST_PREY_IDX = N_POPULATION - 2;
 const LAMBDA_MAX = 7;
 const LAMBDA_MIN = 3;
-const PROB_FOLLOW_UP = 0.5;
-const TAU = 0.3;
+const PROB_FOLLOW_UP = 0.8;
+const TAU = 0.8;//0.3;
+const BETA = 1;
+
+// const Result = struct {
+//     prey: []f64,
+//     fitness: f64,
+//     evaluations: usize,
+// };
+
+fn abs(v: f64) f64 {
+    return if (v >= 0) v else -v;
+}
+
 fn movePrey(
     idx: usize,
-    population: [][]f64,
-    fitnesses: []f64,
+    population: []const []const f64,
+    fitnesses: []const f64,
+    result: []f64,
+    result_fitness: *f64,
     allocator: Allocator,
     rnd: Random,
-) usize {
-    const n = fitnesses.len;
+) !usize {
+    const n = population[0].len;
+    @memcpy(result, population[idx]);
+    result_fitness.* = fitnesses[idx];
 
-    // fitnesses ordenado de mayor a menor
+    // fitnesses ordenado de menor a mayor
+    // 1 2 3 4
+    std.debug.assert(std.sort.isSorted(f64, fitnesses, {}, std.sort.asc(f64)));
     const num_preys_with_better_fitness = for (fitnesses, 0..) |fitness, i| {
-        if (fitness <= fitnesses[idx])
+        if (fitness >= fitnesses[idx])
             break i;
     } else 0;
 
-    var direction = try allocator.alloc(f64, n);
-    defer allocator.free(direction);
-    var mut = try allocator.alloc(f64, n);
+    const mut = try allocator.alloc(f64, n);
     defer allocator.free(mut);
 
     if (num_preys_with_better_fitness == 0) {
         // best prey (puede haber varias)
-        // generate K random directions
-        // perform local search with K mutations
         for (0..K) |_| {
             // Calculate mutation
-            utils.randomDirection(direction, rnd);
+            const epsilon = rnd.float(f64);
+            utils.randomDirection(mut, rnd);
             for (0..n) |i| {
-                mut[i] = population[idx][i] + LAMBDA_MIN * rnd.float(f64) * direction[i];
+                mut[i] = result[i] + LAMBDA_MIN * epsilon * mut[i];
             }
 
-            const mut_fitness = c.cec17_fitness(mut.ptr);
-            if (mut_fitness > fitnesses[idx])
-                @memcpy(population[idx], mut);
+            const mut_fitness = surviveValue(mut);
+            if (mut_fitness < result_fitness.*) {
+                @memcpy(result, mut);
+                // print("best prey: {d:.3} -> {d:.3}\n", .{result_fitness.*, mut_fitness});
+                result_fitness.* = mut_fitness;
+            }
         }
         return K;
     }
 
-    if (rnd.float() <= PROB_FOLLOW_UP) {
+    const direction = try allocator.alloc(f64, n);
+    defer allocator.free(direction);
+    if (rnd.float(f64) <= PROB_FOLLOW_UP) {
         // TODO este doble bucle esta diferente a pabloco
         for (0..n) |i| {
             direction[i] = 0;
@@ -90,10 +161,56 @@ fn movePrey(
                 const dist = utils.distance(population[idx], population[jdx]);
                 const tmp = std.math.pow(f64, fitnesses[jdx], TAU);
                 direction[i] += std.math.exp(tmp - dist) * (population[jdx][i] - population[idx][i]);
+                if (std.math.isInf(direction[i])) {
+                    print("ups {}\n", .{tmp - dist});
+                    assert(false);
+                }
+                // assert(!std.math.isInf(direction[i]));
+                // if (i == 0) {
+                //     std.debug.print("{}\n", .{fitnesses[jdx]});
+                //     std.debug.print("{} {}\n", .{tmp - dist, population[jdx][i] - population[idx][i]});
+                //     std.debug.print("{}\n\n", .{direction[0]});
+                // }
             }
         }
-        // TODO terminar esta parte
 
+        const best_direction_bl = blk: {
+            const direction_bl = try allocator.alloc(f64, n);
+            defer allocator.free(direction_bl);
+            const best_direction_bl = try allocator.alloc(f64, n);
+            @memset(best_direction_bl, 0);
+            var best_direction_bl_fitness = fitnesses[idx];
+
+            for (0..K) |_| {
+                // Calculate mutation
+                utils.randomDirection(direction_bl, rnd);
+                for (0..n) |i| {
+                    mut[i] = population[idx][i] + LAMBDA_MIN * direction_bl[i];
+                }
+
+                const mut_fitness = surviveValue(mut);
+                if (mut_fitness < best_direction_bl_fitness) {
+                    @memcpy(best_direction_bl, direction_bl);
+                    best_direction_bl_fitness = mut_fitness;
+                }
+            }
+            break :blk best_direction_bl;
+        };
+        defer allocator.free(best_direction_bl);
+
+        // Ya tenemos best_direction_bl (yr) y direction (yi). Calculamos el resultado.
+        // print("{}\n", .{direction[0]});
+        utils.normalize(direction);
+        const lmax = LAMBDA_MAX / std.math.exp(BETA * abs(fitnesses[idx] - fitnesses[PREDATOR_IDX]));
+        // const epsilon1 = rnd.float(f64);
+        // const epsilon2 = rnd.float(f64);
+        const epsilon1 = 0.5;
+        const epsilon2 = 1 - epsilon1;
+        for (0..n) |i| {
+            result[i] += lmax * epsilon1 * direction[i] + epsilon2 * best_direction_bl[i];
+        }
+        result_fitness.* = surviveValue(result);
+        return K + 1;
     } else {
         utils.randomDirection(direction, rnd);
 
@@ -107,12 +224,43 @@ fn movePrey(
         }
         const d2 = utils.distance(population[PREDATOR_IDX], mut);
 
-        const mult = if (d1 <= d2) -1 else 1;
+        const mult: f64 = if (d1 <= d2) -1 else 1;
         for (0..n) |i| {
-            population[idx][i] += mult * LAMBDA_MAX * rnd.float(f64) * direction[i];
+            result[i] += mult * LAMBDA_MAX * rnd.float(f64) * direction[i];
         }
-        return 0;
+        result_fitness.* = surviveValue(result);
+        return 1;
     }
+}
+
+fn movePredator(
+    population: []const []const f64,
+    result: []f64,
+    result_fitness: *f64,
+    allocator: Allocator,
+    rnd: Random,
+) !void {
+    const n = population[0].len;
+
+    const direction_rnd = try allocator.alloc(f64, n);
+    defer allocator.free(direction_rnd);
+    utils.randomDirection(direction_rnd, rnd);
+
+    const direction_prey = try allocator.alloc(f64, n);
+    defer allocator.free(direction_prey);
+    for (0..n) |i| {
+        direction_prey[i] = population[WORST_PREY_IDX][i] - population[PREDATOR_IDX][i];
+        // print("{d:.3} {d:.3}\n", .{population[WORST_PREY_IDX][i], population[PREDATOR_IDX][i]});
+    }
+    utils.normalize(direction_prey);
+
+    const epsilon1 = rnd.float(f64);
+    const epsilon2 = rnd.float(f64);
+    @memcpy(result, population[PREDATOR_IDX]);
+    for (0..n) |i| {
+        result[i] += LAMBDA_MAX * epsilon1 * direction_rnd[i] + LAMBDA_MIN * epsilon2 * direction_prey[i];
+    }
+    result_fitness.* = surviveValue(result);
 }
 
 pub fn main() !void {
@@ -125,7 +273,9 @@ pub fn main() !void {
     const rnd = rng.random();
 
     for (1..31) |funcid| {
+        print("funcid: {}\n", .{funcid});
         const sol = try ppa(funcid, 10, allocator, rnd);
         defer allocator.free(sol);
+        print("error: {}\n", .{c.cec17_error(c.cec17_fitness(sol.ptr))});
     }
 }
