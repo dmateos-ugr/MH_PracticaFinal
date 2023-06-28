@@ -68,7 +68,7 @@ pub fn normalize(v: []f64) void {
 
 pub fn randomDirection(direction: []f64, rnd: Random) void {
 	for (direction) |*dir_i| {
-		dir_i.* = rnd.float(f64);
+		dir_i.* = randomFloat(-1, 1, rnd);
 	}
 	normalize(direction);
 }
