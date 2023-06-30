@@ -9,8 +9,8 @@ const assert = std.debug.assert;
 const print = std.debug.print;
 
 const N_POPULATION = 20;
-const MEMETIC = false;
-const N_EVALUATIONS_MEMETIC = 10;
+const MEMETIC = true;
+const N_EVALUATIONS_MEMETIC = 40;
 
 fn surviveValue(solution: []f64) f64 {
     for (solution) |v| {
@@ -23,6 +23,7 @@ fn surviveValue(solution: []f64) f64 {
     // return 1/std.math.log2(fitness);
 }
 
+const BL_MAX_STEP_LENGTH = 15;
 fn busquedaLocal(
     evaluations: usize,
     element: []f64,
@@ -48,10 +49,7 @@ fn busquedaLocal(
     }
 }
 
-fn ppa(funcid: usize, n: usize, allocator: Allocator, rnd: Random) ![]f64 {
-    c.cec17_init("ppa", @intCast(c_int, funcid), @intCast(c_int, n));
-    // c.cec17_print_output();
-
+fn ppa(n: usize, allocator: Allocator, rnd: Random) ![]f64 {
     const max_evaluations = n * 10000;
     var population1: [N_POPULATION][]f64 = undefined;
     var population2: [N_POPULATION][]f64 = undefined;
@@ -81,8 +79,9 @@ fn ppa(funcid: usize, n: usize, allocator: Allocator, rnd: Random) ![]f64 {
     //     std.debug.print("{}\n", .{fitness});
     // }
 
+    var generations: usize = 1;
     var evaluations: usize = 0;
-    while (evaluations < max_evaluations) {
+    while (evaluations < max_evaluations) : (generations += 1) {
         // std.debug.print("evaluations: {}\n", .{evaluations});
         utils.sortPopulationBestFirst(population, fitnesses);
 
@@ -107,7 +106,7 @@ fn ppa(funcid: usize, n: usize, allocator: Allocator, rnd: Random) ![]f64 {
             rnd,
         );
 
-        if (MEMETIC) {
+        if (MEMETIC and (evaluations % 10) == 0) {
             for (new_population, new_fitnesses) |element, *fitness| {
                 try busquedaLocal(N_EVALUATIONS_MEMETIC, element, fitness, allocator, rnd);
                 evaluations += N_EVALUATIONS_MEMETIC;
@@ -120,6 +119,7 @@ fn ppa(funcid: usize, n: usize, allocator: Allocator, rnd: Random) ![]f64 {
         std.mem.swap(*[N_POPULATION]f64, &fitnesses, &new_fitnesses);
     }
 
+    utils.sortPopulationBestFirst(population, fitnesses);
     return allocator.dupe(f64, population[0]);
 }
 
@@ -127,7 +127,6 @@ const K = 20;
 const PREDATOR_IDX = N_POPULATION - 1;
 const BEST_PREY_IDX = 0;
 const WORST_PREY_IDX = N_POPULATION - 2;
-const BL_MAX_STEP_LENGTH = 15;
 const LAMBDA_MAX = 7;
 const LAMBDA_MIN = 3;
 const PROB_FOLLOW_UP = 0.8;
@@ -154,7 +153,7 @@ fn movePrey(
 
     // fitnesses ordenado de menor a mayor
     std.debug.assert(std.sort.isSorted(f64, fitnesses, {}, std.sort.asc(f64)));
-    const num_preys_with_better_fitness = for (fitnesses, 0..) |fitness, i| {
+    const num_preys_with_lower_fitness = for (fitnesses, 0..) |fitness, i| {
         if (fitness >= fitnesses[idx])
             break i;
     } else 0;
@@ -162,7 +161,7 @@ fn movePrey(
     const mut = try allocator.alloc(f64, n);
     defer allocator.free(mut);
 
-    if (num_preys_with_better_fitness == 0) {
+    if (num_preys_with_lower_fitness == 0) {
         // best prey (puede haber varias)
         try busquedaLocal(K, result, result_fitness, allocator, rnd);
         return K;
@@ -173,7 +172,7 @@ fn movePrey(
     if (rnd.float(f64) <= PROB_FOLLOW_UP) {
         for (0..n) |i| {
             direction[i] = 0;
-            for (0..num_preys_with_better_fitness) |jdx| {
+            for (0..num_preys_with_lower_fitness) |jdx| {
                 const dist = utils.distance(population[idx], population[jdx]);
                 const tmp = std.math.pow(f64, fitnesses[jdx], TAU);
                 direction[i] += std.math.exp(tmp - dist) * (population[jdx][i] - population[idx][i]);
@@ -233,6 +232,7 @@ fn movePrey(
         const d2 = utils.distance(population[PREDATOR_IDX], mut);
 
         const mult: f64 = if (d1 <= d2) -1 else 1;
+        // const eps = rnd.float(f64);
         for (0..n) |i| {
             result[i] += mult * LAMBDA_MAX * rnd.float(f64) * direction[i];
         }
@@ -280,9 +280,12 @@ pub fn main() !void {
     var rng = std.rand.DefaultPrng.init(seed);
     const rnd = rng.random();
 
+    const n = 10;
+
     for (1..31) |funcid| {
         print("funcid: {}\n", .{funcid});
-        const sol = try ppa(funcid, 10, allocator, rnd);
+        c.cec17_init("ppa_memetic", @intCast(c_int, funcid), @intCast(c_int, n));
+        const sol = try ppa(n, allocator, rnd);
         defer allocator.free(sol);
         print("error: {}\n", .{c.cec17_error(c.cec17_fitness(sol.ptr))});
     }

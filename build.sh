@@ -13,4 +13,4 @@ fi
 echo "Building project"
 ./zig/zig build -p . -Doptimize=ReleaseSafe
 
-echo "Done. You can run resulting binary with './bin/MH'."
+echo "Done. You can run resulting binary with './bin/mh'."
